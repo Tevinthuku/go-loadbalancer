@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"load_balancer/lb"
 	"log"
 	"net"
@@ -15,36 +18,37 @@ func main() {
 	}
 	defer lb.Close()
 
-	// get connection to backend server
-	clientConn, err := net.Dial("tcp", ":8081")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer clientConn.Close()
 	for {
 		conn, err := lb.Accept()
 		if err != nil {
 			log.Fatal(err)
 		}
-		go handleConnection(conn, clientConn)
+		go handleConnection(conn)
 	}
 }
 
-func handleConnection(conn net.Conn, backendConn net.Conn) error {
+func handleConnection(conn net.Conn) error {
 	connBytes, err := readFromConn(conn)
-	defer conn.Close()
 	if err != nil {
 		return fmt.Errorf("failed to read from conn: %w", err)
 	}
+	defer conn.Close()
+
+	backendConn, err := net.DialTimeout("tcp", ":8081", 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to dial backend conn: %w", err)
+	}
+	defer backendConn.Close()
+
 	_, err = backendConn.Write(connBytes)
 	if err != nil {
 		return fmt.Errorf("failed to write to backend conn: %w", err)
 	}
-	backendConnBytes, err := readFromConn(backendConn)
+	backendResponse, err := readFromConn(backendConn)
 	if err != nil {
 		return fmt.Errorf("failed to read from backend conn: %w", err)
 	}
-	_, err = conn.Write(backendConnBytes)
+	_, err = conn.Write(backendResponse)
 	if err != nil {
 		return fmt.Errorf("failed to write to conn: %w", err)
 	}
@@ -55,10 +59,22 @@ func handleConnection(conn net.Conn, backendConn net.Conn) error {
 func readFromConn(conn net.Conn) ([]byte, error) {
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
+	reader := bufio.NewReader(conn)
+	var buffer bytes.Buffer
+
+	for {
+		chunk := make([]byte, 1024)
+		n, err := reader.Read(chunk)
+		if n > 0 {
+			buffer.Write(chunk[:n])
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
 	}
-	return buf[:n], nil
+
+	return buffer.Bytes(), nil
 }
