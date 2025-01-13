@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
-	"io"
 	"load_balancer/lb"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -23,58 +23,41 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		go handleConnection(conn)
+		go handleHTTPConnection(conn)
 	}
 }
 
-func handleConnection(conn net.Conn) error {
-	connBytes, err := readFromConn(conn)
-	if err != nil {
-		return fmt.Errorf("failed to read from conn: %w", err)
-	}
+func handleHTTPConnection(conn net.Conn) error {
+
 	defer conn.Close()
 
-	backendConn, err := net.DialTimeout("tcp", ":8081", 10*time.Second)
-	if err != nil {
-		return fmt.Errorf("failed to dial backend conn: %w", err)
+	client := &http.Client{
+		Timeout: 10 * time.Second,
 	}
-	defer backendConn.Close()
 
-	_, err = backendConn.Write(connBytes)
+	req, err := http.ReadRequest(bufio.NewReader(conn))
 	if err != nil {
-		return fmt.Errorf("failed to write to backend conn: %w", err)
+		return fmt.Errorf("failed to read request: %w", err)
 	}
-	backendResponse, err := readFromConn(backendConn)
+	defer req.Body.Close()
+
+	// forward request to backend
+	backendURL := fmt.Sprintf("http://localhost:8081%s", req.URL.Path)
+	req.URL, err = url.Parse(backendURL)
 	if err != nil {
-		return fmt.Errorf("failed to read from backend conn: %w", err)
+		return fmt.Errorf("failed to parse backend URL: %w", err)
 	}
-	_, err = conn.Write(backendResponse)
+	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to write to conn: %w", err)
+		return fmt.Errorf("failed to forward request to backend: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// forward response to client
+	err = resp.Write(conn)
+	if err != nil {
+		return fmt.Errorf("failed to write response to client: %w", err)
 	}
 
 	return nil
-}
-
-func readFromConn(conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-
-	reader := bufio.NewReader(conn)
-	var buffer bytes.Buffer
-
-	for {
-		chunk := make([]byte, 1024)
-		n, err := reader.Read(chunk)
-		if n > 0 {
-			buffer.Write(chunk[:n])
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-	}
-
-	return buffer.Bytes(), nil
 }
