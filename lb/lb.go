@@ -48,8 +48,31 @@ func (rr *RequestResolver) worker() {
 	healthyBackendIdx := 0
 	for req := range rr.requestChan {
 		backend := rr.backends[healthyBackendIdx]
-		go backend.handleRequest(req)
-		healthyBackendIdx = (healthyBackendIdx + 1) % len(rr.backends)
+		if backend.isHealthy {
+			go backend.handleRequest(req)
+			healthyBackendIdx = (healthyBackendIdx + 1) % len(rr.backends)
+		} else {
+			// check if the next backends are healthy or not
+			healthyBackendFound := false
+			// loop through all backends to find a healthy one
+			for i := 1; i < len(rr.backends); i++ {
+				absoluteIdx := (healthyBackendIdx + i) % len(rr.backends)
+				if rr.backends[absoluteIdx].isHealthy {
+					healthyBackendFound = true
+					go rr.backends[absoluteIdx].handleRequest(req)
+					// we set this so that the next request will be sent to the next backend
+					healthyBackendIdx = (absoluteIdx + 1) % len(rr.backends)
+					break
+				}
+			}
+			if !healthyBackendFound {
+				response := http.Response{
+					StatusCode: http.StatusServiceUnavailable,
+					Status:     "Service Unavailable",
+				}
+				response.Write(req.writer)
+			}
+		}
 	}
 }
 
