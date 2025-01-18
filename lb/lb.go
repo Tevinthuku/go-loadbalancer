@@ -28,11 +28,14 @@ func (lb *LoadBalancer) Start() error {
 
 type RequestResolver struct {
 	backends    []*Backend
-	requestChan chan *RequestWithResponseWriter
+	requestChan chan *RequestContext
 }
 
 func newRequestResolver(backends []string) *RequestResolver {
-	resolver := &RequestResolver{}
+	resolver := &RequestResolver{
+		requestChan: make(chan *RequestContext),
+		backends:    make([]*Backend, 0, len(backends)),
+	}
 	for _, backend := range backends {
 		resolver.backends = append(resolver.backends, newBackend(backend))
 	}
@@ -41,7 +44,16 @@ func newRequestResolver(backends []string) *RequestResolver {
 }
 
 func (rr *RequestResolver) resolve(w http.ResponseWriter, req *http.Request) {
-	rr.requestChan <- &RequestWithResponseWriter{request: req, writer: w}
+	responseChan := make(chan *http.Response, 1) // buffered channel to avoid goroutine leak
+	rr.requestChan <- &RequestContext{request: req, responseChan: responseChan}
+	response := <-responseChan
+	if response != nil {
+		response.Write(w)
+		if response.Body != nil {
+			response.Body.Close()
+		}
+	}
+	close(responseChan)
 }
 
 func (rr *RequestResolver) worker() {
@@ -70,7 +82,7 @@ func (rr *RequestResolver) worker() {
 					StatusCode: http.StatusServiceUnavailable,
 					Status:     "Service Unavailable",
 				}
-				response.Write(req.writer)
+				req.responseChan <- &response
 			}
 		}
 	}
@@ -93,26 +105,27 @@ func (b *Backend) checkHealth() {
 		resp, err := http.Get(fmt.Sprintf("%s/health", b.address))
 		if err != nil {
 			b.isHealthy = false
-		}
-		if resp.StatusCode != http.StatusOK {
+		} else if resp.StatusCode != http.StatusOK {
 			b.isHealthy = false
 		} else {
 			b.isHealthy = true
 		}
-		resp.Body.Close()
-		time.Sleep(1 * time.Second)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(2 * time.Second)
 	}
 }
 
-func (b *Backend) handleRequest(c *RequestWithResponseWriter) {
-
+func (b *Backend) handleRequest(c *RequestContext) {
+	fmt.Println("backend ", b.address, " handling request")
 	newReq, err := b.generateNewRequest(c.request)
 	if err != nil {
 		newResponse := http.Response{
 			StatusCode: http.StatusInternalServerError,
 			Status:     fmt.Sprintf("Internal Server Error: %s", err.Error()),
 		}
-		newResponse.Write(c.writer)
+		c.responseChan <- &newResponse
 		return
 	}
 
@@ -122,11 +135,11 @@ func (b *Backend) handleRequest(c *RequestWithResponseWriter) {
 			StatusCode: http.StatusInternalServerError,
 			Status:     fmt.Sprintf("Internal Server Error: %s", err.Error()),
 		}
-		newResponse.Write(c.writer)
+		c.responseChan <- &newResponse
 		return
 	}
 
-	resp.Write(c.writer)
+	c.responseChan <- resp
 }
 
 func (b *Backend) generateNewRequest(req *http.Request) (*http.Request, error) {
@@ -146,7 +159,7 @@ func (b *Backend) generateNewRequest(req *http.Request) (*http.Request, error) {
 
 }
 
-type RequestWithResponseWriter struct {
-	request *http.Request
-	writer  http.ResponseWriter
+type RequestContext struct {
+	request      *http.Request
+	responseChan chan *http.Response
 }
