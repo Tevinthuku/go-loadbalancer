@@ -114,7 +114,7 @@ func newBackend(address string) *Backend {
 
 func (b *Backend) checkHealth() {
 	for {
-		resp, err := http.Get(fmt.Sprintf("%s/health", b.address))
+		resp, err := b.client.Get(fmt.Sprintf("%s/health", b.address))
 		if err != nil {
 			b.health.Store(false)
 		} else if resp.StatusCode != http.StatusOK {
