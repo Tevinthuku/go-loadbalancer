@@ -1,9 +1,9 @@
 package lb_test
 
 import (
-	"fmt"
 	"io"
 	"load_balancer/lb"
+	"log"
 	"net/http"
 	"reflect"
 	"strings"
@@ -22,9 +22,14 @@ func TestLoadBalancer(t *testing.T) {
 	}}
 	lb := lb.NewLoadBalancer(":8080", []lb.Backend{b1, b2})
 
-	fmt.Println("starting client")
 	defer lb.Close()
-	go lb.Start()
+	go func() {
+		if err := lb.Start(); err != nil {
+			if err != http.ErrServerClosed {
+				log.Fatal("load balancer err: ", err)
+			}
+		}
+	}()
 
 	client := http.Client{}
 	req, err := http.NewRequest("GET", "http://localhost:8080/test", nil)
@@ -57,13 +62,19 @@ func TestUnhealthyBackendIsSkipped(t *testing.T) {
 	b3 := &TestBackend{idx: 2, healthy: true, onHandleRequest: func() {
 		exec_order = append(exec_order, 2)
 	}}
-	lb := lb.NewLoadBalancer(":8080", []lb.Backend{b1, b2, b3})
+	lb := lb.NewLoadBalancer(":8081", []lb.Backend{b1, b2, b3})
 	defer lb.Close()
-	go lb.Start()
+	go func() {
+		if err := lb.Start(); err != nil {
+			if err != http.ErrServerClosed {
+				log.Fatal("load balancer err: ", err)
+			}
+		}
+	}()
 
 	client := http.Client{}
 	for i := 0; i < 3; i++ {
-		req, err := http.NewRequest("GET", "http://localhost:8080/test", nil)
+		req, err := http.NewRequest("GET", "http://localhost:8081/test", nil)
 		if err != nil {
 			t.Fatalf("failed to create request: %v", err)
 		}
@@ -73,7 +84,7 @@ func TestUnhealthyBackendIsSkipped(t *testing.T) {
 		}
 	}
 	b2.healthy = true
-	req, err := http.NewRequest("GET", "http://localhost:8080/test", nil)
+	req, err := http.NewRequest("GET", "http://localhost:8081/test", nil)
 	if err != nil {
 		t.Fatalf("failed to create request: %v", err)
 	}
