@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"time"
 )
 
 type Server struct {
@@ -15,6 +16,15 @@ func NewServer(address string) *Server {
 }
 
 func (s *Server) Start() error {
+
+	srv := &http.Server{
+		Addr:              s.address,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
+	}
+
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -30,5 +40,5 @@ func (s *Server) Start() error {
 		fmt.Fprintf(w, "Hello, %q", html.EscapeString(r.URL.Path))
 	})
 
-	return http.ListenAndServe(s.address, nil)
+	return srv.ListenAndServe()
 }

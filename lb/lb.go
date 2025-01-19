@@ -1,11 +1,15 @@
 package lb
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -26,11 +30,26 @@ func NewLoadBalancer(port string, backends []string) *LoadBalancer {
 
 func (lb *LoadBalancer) Start() error {
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		lb.resolve(w, r)
-	})
+	svr := http.Server{
+		Addr:    lb.port,
+		Handler: http.HandlerFunc(lb.resolve),
+	}
 
-	return http.ListenAndServe(lb.port, nil)
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := svr.Shutdown(ctx); err != nil {
+			fmt.Printf("HTTP server shutdown error: %v\n", err)
+		}
+		close(lb.requestChan)
+	}()
+
+	return svr.ListenAndServe()
 }
 
 func (lb *LoadBalancer) resolve(w http.ResponseWriter, req *http.Request) {
