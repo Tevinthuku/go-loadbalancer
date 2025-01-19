@@ -15,25 +15,24 @@ import (
 
 type LoadBalancer struct {
 	port        string
-	backends    []*Backend
+	backends    []Backend
 	requestChan chan *RequestContext
+	svr         *http.Server
 }
 
-func NewLoadBalancer(port string, backends []string) *LoadBalancer {
-	lb := &LoadBalancer{port: port, requestChan: make(chan *RequestContext), backends: make([]*Backend, 0, len(backends))}
-	for _, backend := range backends {
-		lb.backends = append(lb.backends, newBackend(backend))
+func NewLoadBalancer(port string, backends []Backend) *LoadBalancer {
+	lb := &LoadBalancer{port: port, requestChan: make(chan *RequestContext), backends: make([]Backend, 0, len(backends))}
+	lb.backends = append(lb.backends, backends...)
+	svr := http.Server{
+		Addr:    lb.port,
+		Handler: http.HandlerFunc(lb.resolve),
 	}
+	lb.svr = &svr
 	go lb.worker()
 	return lb
 }
 
 func (lb *LoadBalancer) Start() error {
-
-	svr := http.Server{
-		Addr:    lb.port,
-		Handler: http.HandlerFunc(lb.resolve),
-	}
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
@@ -43,18 +42,18 @@ func (lb *LoadBalancer) Start() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := svr.Shutdown(ctx); err != nil {
+		if err := lb.svr.Shutdown(ctx); err != nil {
 			fmt.Printf("HTTP server shutdown error: %v\n", err)
 		}
 		close(lb.requestChan)
 	}()
 
-	return svr.ListenAndServe()
+	return lb.svr.ListenAndServe()
 }
 
 func (lb *LoadBalancer) resolve(w http.ResponseWriter, req *http.Request) {
 	responseChan := make(chan *http.Response, 1) // buffered channel to avoid goroutine leak
-	lb.requestChan <- &RequestContext{request: req, responseChan: responseChan}
+	lb.requestChan <- &RequestContext{request: req, ResponseChan: responseChan}
 	response := <-responseChan
 	if response != nil {
 		if err := response.Write(w); err != nil {
@@ -71,8 +70,8 @@ func (lb *LoadBalancer) worker() {
 	healthyBackendIdx := 0
 	for req := range lb.requestChan {
 		backend := lb.backends[healthyBackendIdx]
-		if backend.isHealthy() {
-			go backend.handleRequest(req)
+		if backend.IsHealthy() {
+			go backend.HandleRequest(req)
 			healthyBackendIdx = (healthyBackendIdx + 1) % len(lb.backends)
 		} else {
 			// check if the next backends are healthy or not
@@ -80,9 +79,9 @@ func (lb *LoadBalancer) worker() {
 			// loop through all backends to find a healthy one
 			for i := 1; i < len(lb.backends); i++ {
 				absoluteIdx := (healthyBackendIdx + i) % len(lb.backends)
-				if lb.backends[absoluteIdx].isHealthy() {
+				if lb.backends[absoluteIdx].IsHealthy() {
 					healthyBackendFound = true
-					go lb.backends[absoluteIdx].handleRequest(req)
+					go lb.backends[absoluteIdx].HandleRequest(req)
 					// we set this so that the next request will be sent to the next backend
 					healthyBackendIdx = (absoluteIdx + 1) % len(lb.backends)
 					break
@@ -93,26 +92,38 @@ func (lb *LoadBalancer) worker() {
 					StatusCode: http.StatusServiceUnavailable,
 					Body:       io.NopCloser(strings.NewReader("Service Unavailable")),
 				}
-				req.responseChan <- &response
+				req.ResponseChan <- &response
 			}
 		}
 	}
 }
 
-type Backend struct {
+func (lb *LoadBalancer) Close() {
+	close(lb.requestChan)
+	if err := lb.svr.Shutdown(context.Background()); err != nil {
+		fmt.Println("error during shutdown: ", err)
+	}
+}
+
+type Backend interface {
+	HandleRequest(c *RequestContext)
+	IsHealthy() bool
+}
+
+type HttpBackend struct {
 	address string
 	health  atomic.Bool
 	client  *http.Client
 }
 
-func newBackend(address string) *Backend {
-	backend := &Backend{address: address, client: &http.Client{}}
+func NewHttpBackend(address string) *HttpBackend {
+	backend := &HttpBackend{address: address, client: &http.Client{}}
 	backend.health.Store(true)
 	go backend.checkHealth()
 	return backend
 }
 
-func (b *Backend) checkHealth() {
+func (b *HttpBackend) checkHealth() {
 	for {
 		resp, err := b.client.Get(fmt.Sprintf("%s/health", b.address))
 		if err != nil {
@@ -129,7 +140,7 @@ func (b *Backend) checkHealth() {
 	}
 }
 
-func (b *Backend) handleRequest(c *RequestContext) {
+func (b *HttpBackend) HandleRequest(c *RequestContext) {
 	fmt.Println("backend ", b.address, " handling request")
 	newReq, err := b.generateNewRequest(c.request)
 	if err != nil {
@@ -137,7 +148,7 @@ func (b *Backend) handleRequest(c *RequestContext) {
 			StatusCode: http.StatusInternalServerError,
 			Body:       io.NopCloser(strings.NewReader(fmt.Sprintf("Internal Server Error: %s", err.Error()))),
 		}
-		c.responseChan <- &newResponse
+		c.ResponseChan <- &newResponse
 		return
 	}
 
@@ -147,14 +158,14 @@ func (b *Backend) handleRequest(c *RequestContext) {
 			StatusCode: http.StatusInternalServerError,
 			Body:       io.NopCloser(strings.NewReader(fmt.Sprintf("Internal Server Error: %s", err.Error()))),
 		}
-		c.responseChan <- &newResponse
+		c.ResponseChan <- &newResponse
 		return
 	}
 
-	c.responseChan <- resp
+	c.ResponseChan <- resp
 }
 
-func (b *Backend) generateNewRequest(req *http.Request) (*http.Request, error) {
+func (b *HttpBackend) generateNewRequest(req *http.Request) (*http.Request, error) {
 	backendURL := fmt.Sprintf("%s%s?%s", b.address, req.URL.Path, req.URL.RawQuery)
 	newReq, err := http.NewRequest(req.Method, backendURL, req.Body)
 	if err != nil {
@@ -171,11 +182,11 @@ func (b *Backend) generateNewRequest(req *http.Request) (*http.Request, error) {
 
 }
 
-func (b *Backend) isHealthy() bool {
+func (b *HttpBackend) IsHealthy() bool {
 	return b.health.Load()
 }
 
 type RequestContext struct {
 	request      *http.Request
-	responseChan chan *http.Response
+	ResponseChan chan *http.Response
 }

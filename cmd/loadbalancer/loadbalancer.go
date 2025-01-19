@@ -20,14 +20,15 @@ func main() {
 	}
 	lb_address := fmt.Sprintf(":%s", lb_port)
 	backend_ports := os.Getenv("BACKEND_PORTS")
-	backend_addresses := []string{}
+	backend_addresses := []lb.Backend{}
 	for _, port := range strings.Split(backend_ports, ",") {
 		if _, err := strconv.Atoi(port); err != nil {
 			log.Fatal("BACKEND_PORTS must be a valid port number")
 		}
-		backend_addresses = append(backend_addresses, fmt.Sprintf("http://localhost:%s", port))
+		backend_addresses = append(backend_addresses, lb.NewHttpBackend(fmt.Sprintf("http://localhost:%s", port)))
 	}
 	lb := lb.NewLoadBalancer(lb_address, backend_addresses)
+	defer lb.Close()
 
 	if err := lb.Start(); err != nil {
 		log.Fatal(err)
