@@ -28,10 +28,10 @@ func main() {
 		backend_addresses = append(backend_addresses, lb.NewHttpBackend(fmt.Sprintf("http://localhost:%s", port)))
 	}
 	lb := lb.NewLoadBalancer(lb_address, backend_addresses)
+	defer lb.Close()
 
 	if err := lb.Start(); err != nil {
 		log.Fatal(err)
 	}
-	defer lb.Close()
 
 }

@@ -100,7 +100,9 @@ func (lb *LoadBalancer) worker() {
 
 func (lb *LoadBalancer) Close() {
 	close(lb.requestChan)
-	lb.svr.Shutdown(context.Background())
+	if err := lb.svr.Shutdown(context.Background()); err != nil {
+		fmt.Println("error during shutdown: ", err)
+	}
 }
 
 type Backend interface {
