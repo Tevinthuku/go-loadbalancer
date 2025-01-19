@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,7 +38,9 @@ func (lb *LoadBalancer) resolve(w http.ResponseWriter, req *http.Request) {
 	lb.requestChan <- &RequestContext{request: req, responseChan: responseChan}
 	response := <-responseChan
 	if response != nil {
-		response.Write(w)
+		if err := response.Write(w); err != nil {
+			fmt.Println("failed to write response to client", err)
+		}
 		if response.Body != nil {
 			response.Body.Close()
 		}
@@ -49,7 +52,7 @@ func (lb *LoadBalancer) worker() {
 	healthyBackendIdx := 0
 	for req := range lb.requestChan {
 		backend := lb.backends[healthyBackendIdx]
-		if backend.isHealthy {
+		if backend.isHealthy() {
 			go backend.handleRequest(req)
 			healthyBackendIdx = (healthyBackendIdx + 1) % len(lb.backends)
 		} else {
@@ -58,7 +61,7 @@ func (lb *LoadBalancer) worker() {
 			// loop through all backends to find a healthy one
 			for i := 1; i < len(lb.backends); i++ {
 				absoluteIdx := (healthyBackendIdx + i) % len(lb.backends)
-				if lb.backends[absoluteIdx].isHealthy {
+				if lb.backends[absoluteIdx].isHealthy() {
 					healthyBackendFound = true
 					go lb.backends[absoluteIdx].handleRequest(req)
 					// we set this so that the next request will be sent to the next backend
@@ -78,13 +81,14 @@ func (lb *LoadBalancer) worker() {
 }
 
 type Backend struct {
-	address   string
-	isHealthy bool
-	client    *http.Client
+	address string
+	health  atomic.Bool
+	client  *http.Client
 }
 
 func newBackend(address string) *Backend {
-	backend := &Backend{address: address, isHealthy: true, client: &http.Client{}}
+	backend := &Backend{address: address, client: &http.Client{}}
+	backend.health.Store(true)
 	go backend.checkHealth()
 	return backend
 }
@@ -93,11 +97,11 @@ func (b *Backend) checkHealth() {
 	for {
 		resp, err := http.Get(fmt.Sprintf("%s/health", b.address))
 		if err != nil {
-			b.isHealthy = false
+			b.health.Store(false)
 		} else if resp.StatusCode != http.StatusOK {
-			b.isHealthy = false
+			b.health.Store(false)
 		} else {
-			b.isHealthy = true
+			b.health.Store(true)
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -132,7 +136,7 @@ func (b *Backend) handleRequest(c *RequestContext) {
 }
 
 func (b *Backend) generateNewRequest(req *http.Request) (*http.Request, error) {
-	backendURL := fmt.Sprintf("%s%s", b.address, req.URL.Path)
+	backendURL := fmt.Sprintf("%s%s?%s", b.address, req.URL.Path, req.URL.RawQuery)
 	newReq, err := http.NewRequest(req.Method, backendURL, req.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create backend request: %w", err)
@@ -146,6 +150,10 @@ func (b *Backend) generateNewRequest(req *http.Request) (*http.Request, error) {
 	}
 	return newReq, nil
 
+}
+
+func (b *Backend) isHealthy() bool {
+	return b.health.Load()
 }
 
 type RequestContext struct {
