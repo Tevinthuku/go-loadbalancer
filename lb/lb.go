@@ -2,50 +2,39 @@ package lb
 
 import (
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 type LoadBalancer struct {
 	port        string
-	reqResolver *RequestResolver
+	backends    []*Backend
+	requestChan chan *RequestContext
 }
 
 func NewLoadBalancer(port string, backends []string) *LoadBalancer {
-	lb := &LoadBalancer{port: port}
-	lb.reqResolver = newRequestResolver(backends)
+	lb := &LoadBalancer{port: port, requestChan: make(chan *RequestContext), backends: make([]*Backend, 0, len(backends))}
+	for _, backend := range backends {
+		lb.backends = append(lb.backends, newBackend(backend))
+	}
+	go lb.worker()
 	return lb
 }
 
 func (lb *LoadBalancer) Start() error {
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		lb.reqResolver.resolve(w, r)
+		lb.resolve(w, r)
 	})
 
 	return http.ListenAndServe(lb.port, nil)
 }
 
-type RequestResolver struct {
-	backends    []*Backend
-	requestChan chan *RequestContext
-}
-
-func newRequestResolver(backends []string) *RequestResolver {
-	resolver := &RequestResolver{
-		requestChan: make(chan *RequestContext),
-		backends:    make([]*Backend, 0, len(backends)),
-	}
-	for _, backend := range backends {
-		resolver.backends = append(resolver.backends, newBackend(backend))
-	}
-	go resolver.worker()
-	return resolver
-}
-
-func (rr *RequestResolver) resolve(w http.ResponseWriter, req *http.Request) {
+func (lb *LoadBalancer) resolve(w http.ResponseWriter, req *http.Request) {
 	responseChan := make(chan *http.Response, 1) // buffered channel to avoid goroutine leak
-	rr.requestChan <- &RequestContext{request: req, responseChan: responseChan}
+	lb.requestChan <- &RequestContext{request: req, responseChan: responseChan}
 	response := <-responseChan
 	if response != nil {
 		response.Write(w)
@@ -56,31 +45,31 @@ func (rr *RequestResolver) resolve(w http.ResponseWriter, req *http.Request) {
 	close(responseChan)
 }
 
-func (rr *RequestResolver) worker() {
+func (lb *LoadBalancer) worker() {
 	healthyBackendIdx := 0
-	for req := range rr.requestChan {
-		backend := rr.backends[healthyBackendIdx]
+	for req := range lb.requestChan {
+		backend := lb.backends[healthyBackendIdx]
 		if backend.isHealthy {
 			go backend.handleRequest(req)
-			healthyBackendIdx = (healthyBackendIdx + 1) % len(rr.backends)
+			healthyBackendIdx = (healthyBackendIdx + 1) % len(lb.backends)
 		} else {
 			// check if the next backends are healthy or not
 			healthyBackendFound := false
 			// loop through all backends to find a healthy one
-			for i := 1; i < len(rr.backends); i++ {
-				absoluteIdx := (healthyBackendIdx + i) % len(rr.backends)
-				if rr.backends[absoluteIdx].isHealthy {
+			for i := 1; i < len(lb.backends); i++ {
+				absoluteIdx := (healthyBackendIdx + i) % len(lb.backends)
+				if lb.backends[absoluteIdx].isHealthy {
 					healthyBackendFound = true
-					go rr.backends[absoluteIdx].handleRequest(req)
+					go lb.backends[absoluteIdx].handleRequest(req)
 					// we set this so that the next request will be sent to the next backend
-					healthyBackendIdx = (absoluteIdx + 1) % len(rr.backends)
+					healthyBackendIdx = (absoluteIdx + 1) % len(lb.backends)
 					break
 				}
 			}
 			if !healthyBackendFound {
 				response := http.Response{
 					StatusCode: http.StatusServiceUnavailable,
-					Status:     "Service Unavailable",
+					Body:       io.NopCloser(strings.NewReader("Service Unavailable")),
 				}
 				req.responseChan <- &response
 			}
@@ -123,7 +112,7 @@ func (b *Backend) handleRequest(c *RequestContext) {
 	if err != nil {
 		newResponse := http.Response{
 			StatusCode: http.StatusInternalServerError,
-			Status:     fmt.Sprintf("Internal Server Error: %s", err.Error()),
+			Body:       io.NopCloser(strings.NewReader(fmt.Sprintf("Internal Server Error: %s", err.Error()))),
 		}
 		c.responseChan <- &newResponse
 		return
@@ -133,7 +122,7 @@ func (b *Backend) handleRequest(c *RequestContext) {
 	if err != nil {
 		newResponse := http.Response{
 			StatusCode: http.StatusInternalServerError,
-			Status:     fmt.Sprintf("Internal Server Error: %s", err.Error()),
+			Body:       io.NopCloser(strings.NewReader(fmt.Sprintf("Internal Server Error: %s", err.Error()))),
 		}
 		c.responseChan <- &newResponse
 		return
