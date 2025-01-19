@@ -4,61 +4,33 @@ import (
 	"fmt"
 	"load_balancer/lb"
 	"log"
-	"net"
-	"time"
+	"os"
+	"strconv"
+	"strings"
 )
 
 func main() {
-	lb, err := lb.NewLoadBalancer(":8080")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer lb.Close()
 
-	// get connection to backend server
-	clientConn, err := net.Dial("tcp", ":8081")
-	if err != nil {
-		log.Fatal(err)
+	lb_port := os.Getenv("LB_PORT")
+	if lb_port == "" {
+		log.Fatal("LB_PORT is not set")
 	}
-	defer clientConn.Close()
-	for {
-		conn, err := lb.Accept()
-		if err != nil {
-			log.Fatal(err)
+	if _, err := strconv.Atoi(lb_port); err != nil {
+		log.Fatal("LB_PORT must be a valid port number")
+	}
+	lb_address := fmt.Sprintf(":%s", lb_port)
+	backend_ports := os.Getenv("BACKEND_PORTS")
+	backend_addresses := []string{}
+	for _, port := range strings.Split(backend_ports, ",") {
+		if _, err := strconv.Atoi(port); err != nil {
+			log.Fatal("BACKEND_PORTS must be a valid port number")
 		}
-		go handleConnection(conn, clientConn)
+		backend_addresses = append(backend_addresses, fmt.Sprintf("http://localhost:%s", port))
 	}
-}
+	lb := lb.NewLoadBalancer(lb_address, backend_addresses)
 
-func handleConnection(conn net.Conn, backendConn net.Conn) error {
-	connBytes, err := readFromConn(conn)
-	defer conn.Close()
-	if err != nil {
-		return fmt.Errorf("failed to read from conn: %w", err)
-	}
-	_, err = backendConn.Write(connBytes)
-	if err != nil {
-		return fmt.Errorf("failed to write to backend conn: %w", err)
-	}
-	backendConnBytes, err := readFromConn(backendConn)
-	if err != nil {
-		return fmt.Errorf("failed to read from backend conn: %w", err)
-	}
-	_, err = conn.Write(backendConnBytes)
-	if err != nil {
-		return fmt.Errorf("failed to write to conn: %w", err)
+	if err := lb.Start(); err != nil {
+		log.Fatal(err)
 	}
 
-	return nil
-}
-
-func readFromConn(conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:n], nil
 }
